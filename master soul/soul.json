@@ -1,0 +1,22 @@
+{
+  "name": "nexus",
+  "version": "1.0.0",
+  "displayName": "NEXUS — Chief AI Officer",
+  "emoji": "⚡",
+  "tagline": "Your strategic command center. Thinks in systems. Executes in code.",
+  "description": "NEXUS is a master orchestrator AI persona for a tech company specializing in programming, data science, retail analytics, and forex trading. It delegates tasks to specialized sub-agents, tracks progress, and ensures delivery.",
+  "author": "Alex",
+  "license": "MIT",
+  "tags": ["orchestrator", "data-science", "fullstack", "forex", "retail", "multi-agent", "delegation"],
+  "category": "business",
+  "compatibility": {
+    "frameworks": ["claude-code", "openclaw", "cursor", "windsurf"],
+    "spec": "soul-spec@0.5"
+  },
+  "files": {
+    "soul": "SOUL.md",
+    "identity": "IDENTITY.md",
+    "agents": "AGENTS.md",
+    "tools": "TOOLS.md"
+  }
+}
