@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  fixed.sh — Repair xRDP + Complete Remaining Setup Steps
-#  Run this after setup.sh failed at "systemctl enable xrdp"
+#  fixed.sh  (v3) — Fix xRDP log permission + Complete Remaining Steps
+#  Root cause: xrdp cannot open /var/log/xrdp.log  (wrong owner/missing file)
 #
 #  Usage:
 #    wget -O fixed.sh <RAW_GITHUB_URL> && chmod +x fixed.sh && sudo bash fixed.sh
@@ -26,12 +26,15 @@ log()     { echo -e "${CYAN}[INFO]${RESET}  $*" | tee -a "$LOG_FILE"; }
 ok()      { echo -e "${GREEN}[ OK ]${RESET}  $*" | tee -a "$LOG_FILE"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*" | tee -a "$LOG_FILE"; }
 err()     { echo -e "${RED}[FAIL]${RESET}  $*" | tee -a "$LOG_FILE"; }
+die()     { err "$*"; exit 1; }
 section() {
   echo "" | tee -a "$LOG_FILE"
   echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════${RESET}" | tee -a "$LOG_FILE"
   echo -e "${BOLD}${CYAN}  $*${RESET}" | tee -a "$LOG_FILE"
   echo -e "${BOLD}${CYAN}════════════════════════════════════════════════════${RESET}" | tee -a "$LOG_FILE"
 }
+
+# Patch or append  key=value  in an ini-style config file
 set_cfg() {
   local file="$1" key="$2" val="$3"
   if grep -qE "^[#;]?\s*${key}\s*=" "$file" 2>/dev/null; then
@@ -49,36 +52,101 @@ touch "$LOG_FILE"
 echo ""
 echo -e "${BOLD}${YELLOW}"
 echo "  ╔══════════════════════════════════════════════════════╗"
-echo "  ║        fixed.sh — xRDP Repair + Remaining Steps     ║"
+echo "  ║      fixed.sh v3 — xRDP Repair + Remaining Steps   ║"
 echo "  ║  Port: ${RDP_PORT}  |  User: ${RDP_USER}                       ║"
 echo "  ╚══════════════════════════════════════════════════════╝"
 echo -e "${RESET}"
-log "fixed.sh started at $(date)"
+log "fixed.sh v3 started at $(date)"
 
 # =============================================================================
-section "FIX 1 — Stop & Purge Broken xRDP State"
+section "FIX 1 — Stop xRDP completely"
 # =============================================================================
-log "Stopping xRDP if running..."
-systemctl stop xrdp xrdp-sesman 2>/dev/null || true
-
-log "Reinstalling xRDP to get a clean default config..."
-DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y xrdp
-ok "xRDP reinstalled with fresh default config."
+log "Stopping xrdp and xrdp-sesman services..."
+systemctl stop xrdp-sesman 2>/dev/null || true
+systemctl stop xrdp        2>/dev/null || true
+# Kill any leftover processes
+pkill -9 -f xrdp 2>/dev/null || true
+sleep 1
+ok "xRDP stopped."
 
 # =============================================================================
-section "FIX 2 — Restore & Patch xrdp.ini Correctly"
+section "FIX 2 — Fix xRDP Log Files  ← ROOT CAUSE OF FAILURE"
 # =============================================================================
-# ROOT CAUSE OF PREVIOUS FAILURE:
-#   The old setup.sh replaced the entire xrdp.ini with a custom version that
-#   had an invalid [channels] section and missing required entries.
-#   FIX: Always patch the default config with sed — never overwrite it.
+# The exact error was:
+#   "error opening log file [The log is not properly started]. quitting."
+# This means /var/log/xrdp.log and /var/log/xrdp-sesman.log either:
+#   (a) Don't exist, or (b) Are owned by root instead of xrdp:xrdp
 
+log "Creating and fixing permissions on xRDP log files..."
+
+# Create log files if they don't exist
+touch /var/log/xrdp.log
+touch /var/log/xrdp-sesman.log
+
+# Fix ownership — must be owned by xrdp user
+chown xrdp:xrdp /var/log/xrdp.log
+chown xrdp:xrdp /var/log/xrdp-sesman.log
+
+# Fix permissions — xrdp must be able to write
+chmod 640 /var/log/xrdp.log
+chmod 640 /var/log/xrdp-sesman.log
+
+ok "Log files created with correct xrdp:xrdp ownership."
+log "  /var/log/xrdp.log        → $(stat -c '%U:%G %a' /var/log/xrdp.log)"
+log "  /var/log/xrdp-sesman.log → $(stat -c '%U:%G %a' /var/log/xrdp-sesman.log)"
+
+# Also ensure xrdp user can write to /var/log itself if needed
+chmod o+rx /var/log 2>/dev/null || true
+
+# =============================================================================
+section "FIX 3 — Verify xRDP Log Path in sesman.ini"
+# =============================================================================
+# xrdp-sesman has its own log config — make sure it points to a writable path
+SESMAN_INI=/etc/xrdp/sesman.ini
+if [[ -f "$SESMAN_INI" ]]; then
+  log "Checking sesman.ini log path..."
+  cp "$SESMAN_INI" "${SESMAN_INI}.backup.v3" 2>/dev/null || true
+
+  # Ensure LogFile points to correct path
+  if grep -qE "^[#;]?\s*LogFile\s*=" "$SESMAN_INI"; then
+    sed -i "s|^[#;]\?\s*LogFile\s*=.*|LogFile=/var/log/xrdp-sesman.log|" "$SESMAN_INI"
+  else
+    # Insert under [Logging] section or append
+    if grep -q '^\[Logging\]' "$SESMAN_INI"; then
+      sed -i '/^\[Logging\]/a LogFile=\/var\/log\/xrdp-sesman.log' "$SESMAN_INI"
+    else
+      echo -e "\n[Logging]\nLogFile=/var/log/xrdp-sesman.log" >> "$SESMAN_INI"
+    fi
+  fi
+
+  # Also fix LogLevel and EnableSyslog
+  if grep -qE "^[#;]?\s*LogLevel\s*=" "$SESMAN_INI"; then
+    sed -i "s|^[#;]\?\s*LogLevel\s*=.*|LogLevel=INFO|" "$SESMAN_INI"
+  fi
+
+  ok "sesman.ini log path verified → /var/log/xrdp-sesman.log"
+else
+  warn "sesman.ini not found at $SESMAN_INI — skipping."
+fi
+
+# =============================================================================
+section "FIX 4 — Patch xrdp.ini (port + TLS + performance)"
+# =============================================================================
 XRDP_INI=/etc/xrdp/xrdp.ini
 
-log "Backing up fresh xrdp.ini..."
-cp "$XRDP_INI" "${XRDP_INI}.fresh" 2>/dev/null || true
+if [[ ! -f "$XRDP_INI" ]]; then
+  log "xrdp.ini missing — reinstalling xRDP package..."
+  DEBIAN_FRONTEND=noninteractive apt-get install --reinstall -y xrdp
+  # Re-fix log files after reinstall (reinstall may reset them)
+  touch /var/log/xrdp.log /var/log/xrdp-sesman.log
+  chown xrdp:xrdp /var/log/xrdp.log /var/log/xrdp-sesman.log
+  chmod 640 /var/log/xrdp.log /var/log/xrdp-sesman.log
+fi
 
-log "Patching xrdp.ini (port, TLS, performance)..."
+log "Backing up xrdp.ini..."
+cp "$XRDP_INI" "${XRDP_INI}.backup.v3" 2>/dev/null || true
+
+log "Patching xrdp.ini..."
 set_cfg "$XRDP_INI" port               "$RDP_PORT"
 set_cfg "$XRDP_INI" address            "0.0.0.0"
 set_cfg "$XRDP_INI" security_layer     "tls"
@@ -96,12 +164,11 @@ set_cfg "$XRDP_INI" bitmap_compression "yes"
 set_cfg "$XRDP_INI" bulk_compression   "yes"
 set_cfg "$XRDP_INI" new_cursors        "true"
 set_cfg "$XRDP_INI" use_compression    "yes"
-ok "xrdp.ini patched — port ${RDP_PORT}, TLS 1.2/1.3, performance tuned."
+ok "xrdp.ini patched — port ${RDP_PORT}, TLS 1.2/1.3, performance."
 
 # =============================================================================
-section "FIX 3 — Fix startwm.sh for XFCE4"
+section "FIX 5 — Fix startwm.sh for XFCE4"
 # =============================================================================
-log "Writing correct startwm.sh..."
 cat > /etc/xrdp/startwm.sh << 'WMEOF'
 #!/bin/sh
 # xRDP session startup — XFCE4
@@ -118,26 +185,27 @@ fi
 startxfce4
 WMEOF
 chmod +x /etc/xrdp/startwm.sh
-ok "startwm.sh fixed."
+ok "startwm.sh → XFCE4."
 
 # =============================================================================
-section "FIX 4 — Regenerate TLS Certificate"
+section "FIX 6 — Regenerate TLS Certificate"
 # =============================================================================
-log "Regenerating TLS certificate..."
+log "Regenerating self-signed TLS certificate..."
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout /etc/xrdp/key.pem \
   -out    /etc/xrdp/cert.pem \
   -days   "$CERT_DAYS" \
   -subj   "/CN=${HOSTNAME_NEW}/O=Pixxie/C=TH" 2>/dev/null
+
 chown xrdp:xrdp /etc/xrdp/key.pem /etc/xrdp/cert.pem
 chmod 600 /etc/xrdp/key.pem
 chmod 644 /etc/xrdp/cert.pem
 ok "TLS certificate regenerated."
 
 # =============================================================================
-section "FIX 5 — Fix .xsession and User Groups"
+section "FIX 7 — Fix .xsession + X11 Wrapper + User Groups"
 # =============================================================================
-log "Setting up .xsession for $RDP_USER..."
+# .xsession
 cat > "/home/${RDP_USER}/.xsession" << 'XSEOF'
 #!/bin/sh
 unset DBUS_SESSION_BUS_ADDRESS
@@ -147,13 +215,11 @@ XSEOF
 chown "${RDP_USER}:${RDP_USER}" "/home/${RDP_USER}/.xsession"
 chmod 755 "/home/${RDP_USER}/.xsession"
 
+# User groups
 usermod -aG xrdp     "$RDP_USER" 2>/dev/null || true
 usermod -aG ssl-cert "$RDP_USER" 2>/dev/null || true
-ok ".xsession and groups fixed."
 
-# =============================================================================
-section "FIX 6 — Fix X11 Wrapper"
-# =============================================================================
+# X11 wrapper
 if [[ -f /etc/X11/Xwrapper.config ]]; then
   sed -i 's/allowed_users=console/allowed_users=anybody/' /etc/X11/Xwrapper.config
   grep -q 'needs_root_rights' /etc/X11/Xwrapper.config \
@@ -161,29 +227,40 @@ if [[ -f /etc/X11/Xwrapper.config ]]; then
 else
   printf 'allowed_users=anybody\nneeds_root_rights=yes\n' > /etc/X11/Xwrapper.config
 fi
-ok "X11 wrapper → allowed_users=anybody."
+
+ok ".xsession, X11 wrapper, and user groups all fixed."
 
 # =============================================================================
-section "FIX 7 — Enable & Start xRDP"
+section "FIX 8 — Start xRDP (with full log check)"
 # =============================================================================
+log "Reloading systemd and enabling xRDP..."
 systemctl daemon-reload
 systemctl enable xrdp
 
 log "Starting xRDP..."
 if systemctl restart xrdp; then
-  sleep 2
+  sleep 3
+
   if systemctl is-active --quiet xrdp; then
-    ok "xRDP is running successfully on port ${RDP_PORT}."
+    ok "xRDP is running successfully."
+    log "Port check:"
+    ss -tlnp | grep ":${RDP_PORT}" | tee -a "$LOG_FILE" \
+      && ok "Port ${RDP_PORT} is OPEN." \
+      || warn "Port ${RDP_PORT} not visible yet — may still be binding."
   else
-    err "xRDP started but then stopped. Journal:"
-    journalctl -u xrdp --no-pager -n 40 | tee -a "$LOG_FILE"
-    exit 1
+    err "xRDP started but then stopped. Last journal lines:"
+    journalctl -u xrdp --no-pager -n 50 | tee -a "$LOG_FILE"
+    die "xRDP is still failing. Review the journal output above."
   fi
 else
-  err "xRDP failed to start. Journal:"
-  journalctl -u xrdp --no-pager -n 40 | tee -a "$LOG_FILE"
-  exit 1
+  err "systemctl restart xrdp returned non-zero. Journal:"
+  journalctl -u xrdp --no-pager -n 50 | tee -a "$LOG_FILE"
+  die "xRDP could not be started. Review the output above."
 fi
+
+# Show current xrdp.log for confirmation
+log "Last 5 lines of /var/log/xrdp.log:"
+tail -5 /var/log/xrdp.log 2>/dev/null | tee -a "$LOG_FILE" || true
 
 # =============================================================================
 section "STEP 6 — Firewall (UFW)"
@@ -197,14 +274,14 @@ ufw allow 22/tcp            comment 'SSH'
 ufw allow "${RDP_PORT}/tcp" comment 'xRDP'
 ufw --force enable
 
-ok "UFW enabled. Ports open: SSH(22), xRDP(${RDP_PORT})."
+ok "UFW enabled — Open: SSH(22), xRDP(${RDP_PORT})."
 ufw status verbose | tee -a "$LOG_FILE"
 
 # =============================================================================
 section "STEP 7 — Fail2Ban (Brute Force Protection)"
 # =============================================================================
-log "Installing and configuring Fail2Ban..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban
+log "Configuring Fail2Ban..."
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fail2ban
 cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local 2>/dev/null || true
 
 cat > /etc/fail2ban/jail.d/xrdp.conf << FBEOF
@@ -246,9 +323,9 @@ ok "Fail2Ban active — xRDP: 5 tries→1hr ban | SSH: 4 tries→2hr ban."
 # =============================================================================
 section "STEP 8 — SSH Hardening"
 # =============================================================================
-log "Hardening SSH configuration..."
+log "Hardening SSH..."
 SSHD=/etc/ssh/sshd_config
-cp "$SSHD" "${SSHD}.backup.fixed" 2>/dev/null || true
+cp "$SSHD" "${SSHD}.backup.v3" 2>/dev/null || true
 
 ssh_set() {
   local key="$1" val="$2"
@@ -281,7 +358,7 @@ Disconnect immediately if you are not an authorized user.
 BNREOF
 
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-ok "SSH hardened. Root=no. AllowUsers=${RDP_USER}."
+ok "SSH hardened. PermitRootLogin=no. AllowUsers=${RDP_USER}."
 
 # =============================================================================
 section "STEP 9 — System Security Hardening"
@@ -301,7 +378,7 @@ for kv in "minlen=12" "dcredit=-1" "ucredit=-1" "lcredit=-1" "ocredit=-1" "retry
     echo "${k} = ${v}" >> "$PWQUAL"
   fi
 done
-ok "Password policy applied."
+ok "Password policy applied (min 12 chars, mixed case + digits)."
 
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq unattended-upgrades
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'AUEOF'
@@ -342,6 +419,7 @@ ADIR="/home/${RDP_USER}/.config/autostart"
 mkdir -p "$ADIR"
 cat > "${ADIR}/xfce-perf.sh" << 'XPEOF'
 #!/bin/bash
+# Disable compositing for better RDP performance
 xfconf-query -c xfwm4 -p /general/use_compositing -s false 2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/vblank_mode       -s off   2>/dev/null || true
 xfconf-query -c xfwm4 -p /general/box_move          -s true  2>/dev/null || true
@@ -362,32 +440,33 @@ chown -R "${RDP_USER}:${RDP_USER}" "/home/${RDP_USER}/.config"
 ok "XFCE4 performance autostart configured."
 
 # =============================================================================
-section "STEP 11 — Final Verification"
+section "FINAL — Service Status & Verification"
 # =============================================================================
-log "Restarting all services for final check..."
-systemctl daemon-reload
-systemctl restart xrdp      && ok "xRDP      ✓" || err "xRDP      ✗"
-systemctl restart fail2ban  && ok "Fail2Ban  ✓" || err "Fail2Ban  ✗"
-systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-ok "SSH       ✓"
-
-sleep 2
+log "Final service check..."
 echo ""
-log "Service status:"
-systemctl is-active xrdp     | xargs -I{} log "  xRDP      → {}"
-systemctl is-active fail2ban | xargs -I{} log "  Fail2Ban  → {}"
-systemctl is-active ssh      | xargs -I{} log "  SSH       → {}"
-systemctl is-active ufw      | xargs -I{} log "  UFW       → {}"
+
+check_svc() {
+  local name="$1"
+  if systemctl is-active --quiet "$name" 2>/dev/null; then
+    ok "  ${name}  → active ✓"
+  else
+    warn "  ${name}  → INACTIVE ✗  (run: sudo systemctl status ${name})"
+  fi
+}
+
+check_svc xrdp
+check_svc fail2ban
+check_svc ufw
+check_svc ssh 2>/dev/null || check_svc sshd 2>/dev/null || true
 
 echo ""
-log "Listening port check:"
-ss -tlnp 2>/dev/null | grep -E "(:${RDP_PORT}|:22)" | tee -a "$LOG_FILE" \
-  || warn "No matching ports found yet — services may still be starting."
+log "Port check:"
+ss -tlnp 2>/dev/null | grep -E "(:${RDP_PORT}|:22)" | tee -a "$LOG_FILE" || true
 
 if ss -tlnp 2>/dev/null | grep -q ":${RDP_PORT}"; then
-  ok "Port ${RDP_PORT} confirmed OPEN and listening."
+  ok "Port ${RDP_PORT} is OPEN and listening. ✓"
 else
-  warn "Port ${RDP_PORT} not yet visible. Try: sudo ss -tlnp | grep ${RDP_PORT}"
+  warn "Port ${RDP_PORT} not detected. Check: sudo systemctl status xrdp"
 fi
 
 # =============================================================================
@@ -397,7 +476,7 @@ SERVER_IP=$(hostname -I | awk '{print $1}')
 echo ""
 echo -e "${BOLD}${GREEN}"
 echo "  ╔══════════════════════════════════════════════════════╗"
-echo "  ║       ALL STEPS COMPLETED SUCCESSFULLY              ║"
+echo "  ║         ALL STEPS COMPLETED SUCCESSFULLY            ║"
 echo "  ╠══════════════════════════════════════════════════════╣"
 printf "  ║  Server IP  : ${CYAN}%-38s${GREEN}║\n" "$SERVER_IP"
 printf "  ║  RDP Port   : ${CYAN}%-38s${GREEN}║\n" "$RDP_PORT"
@@ -405,11 +484,10 @@ printf "  ║  Username   : ${CYAN}%-38s${GREEN}║\n" "$RDP_USER"
 printf "  ║  Password   : ${CYAN}%-38s${GREEN}║\n" "$RDP_PASS"
 printf "  ║  Connect    : ${CYAN}%-38s${GREEN}║\n" "${SERVER_IP}:${RDP_PORT}"
 echo "  ╠══════════════════════════════════════════════════════╣"
-echo "  ║  Windows: Win+R → mstsc                            ║"
+echo "  ║  Windows: Win+R  →  mstsc                          ║"
 echo "  ║    Computer: YOUR_SERVER_IP:10443                  ║"
-echo "  ║  Log: /var/log/xrdp_setup.log                      ║"
 echo "  ╠══════════════════════════════════════════════════════╣"
-echo "  ║  Diagnostic commands:                              ║"
+echo "  ║  Diagnostics:                                      ║"
 echo "  ║    sudo systemctl status xrdp                      ║"
 echo "  ║    sudo tail -f /var/log/xrdp.log                  ║"
 echo "  ║    sudo ss -tlnp | grep 10443                      ║"
@@ -417,5 +495,5 @@ echo "  ║    sudo ufw status verbose                         ║"
 echo "  ║    sudo fail2ban-client status                     ║"
 echo "  ╚══════════════════════════════════════════════════════╝"
 echo -e "${RESET}"
-warn "Important: Change password after login → passwd ${RDP_USER}"
-log "fixed.sh completed at $(date)"
+warn "Change your password after first login: passwd ${RDP_USER}"
+log "fixed.sh v3 completed at $(date)"
