@@ -11,7 +11,7 @@ set -euo pipefail
 RDP_PORT=10443
 RDP_USER="Pixxie"
 RDP_PASS="Aannggeell5859"
-HOSTNAME_NEW="ubuntu-rdp-server"
+HOSTNAME_NEW="pixxiestudio"
 CERT_DAYS=3650
 CERT_SUBJ="/CN=${HOSTNAME_NEW}/O=Pixxie/C=TH"
 LOG_FILE="/var/log/xrdp_setup.log"
