@@ -72,7 +72,7 @@ log "audit-fix.sh started at $(date)"
 sleep 1
 
 
-
+SERVER_IP=$(hostname -I | awk '{print $1}')
 
 # =============================================================================
 section "ACTION 3 — Fail2Ban: Recidive Jail (Permanent Ban)"
